@@ -27,6 +27,7 @@ from cctop_dashboard import (
     SortPicker,
     HealthStatus,
     _render_message,
+    _is_process_dead,
     format_tokens,
     format_relative_time,
     friendly_model_name,
@@ -658,7 +659,8 @@ def test_get_claude_pids_basic():
         " 1234     1 /usr/local/bin/claude\n"
         " 5678     1 /opt/homebrew/bin/claude -r\n"
     )
-    with patch("cctop_dashboard.subprocess.run") as mock_run:
+    with patch("cctop_dashboard.sys.platform", "linux"), \
+         patch("cctop_dashboard.subprocess.run") as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=ps_output, stderr=""
         )
@@ -673,7 +675,8 @@ def test_get_claude_pids_excludes_desktop_app():
         " 1234     1 /Applications/Claude.app/Contents/MacOS/Claude\n"
         " 5678     1 /usr/local/bin/claude\n"
     )
-    with patch("cctop_dashboard.subprocess.run") as mock_run:
+    with patch("cctop_dashboard.sys.platform", "linux"), \
+         patch("cctop_dashboard.subprocess.run") as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=ps_output, stderr=""
         )
@@ -688,7 +691,8 @@ def test_get_claude_pids_excludes_teammates():
         " 1234     1 /usr/local/bin/claude --parent-session-id abc123\n"
         " 5678     1 /usr/local/bin/claude\n"
     )
-    with patch("cctop_dashboard.subprocess.run") as mock_run:
+    with patch("cctop_dashboard.sys.platform", "linux"), \
+         patch("cctop_dashboard.subprocess.run") as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=ps_output, stderr=""
         )
@@ -705,7 +709,8 @@ def test_get_claude_pids_excludes_mcp_and_uvx():
         " 3000     1 uvx claude-mcp\n"
         " 4000     1 caffeinate -w 1000\n"
     )
-    with patch("cctop_dashboard.subprocess.run") as mock_run:
+    with patch("cctop_dashboard.sys.platform", "linux"), \
+         patch("cctop_dashboard.subprocess.run") as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=ps_output, stderr=""
         )
@@ -715,7 +720,8 @@ def test_get_claude_pids_excludes_mcp_and_uvx():
 
 def test_get_claude_pids_handles_subprocess_error():
     """Should return empty set if ps fails."""
-    with patch("cctop_dashboard.subprocess.run", side_effect=OSError("no ps")):
+    with patch("cctop_dashboard.sys.platform", "linux"), \
+         patch("cctop_dashboard.subprocess.run", side_effect=OSError("no ps")):
         pids = get_claude_pids()
     assert pids == set()
 
@@ -728,7 +734,8 @@ def test_get_claude_pids_excludes_non_claude_basename():
         " 2000     1 /usr/local/bin/claude-dev\n"
         " 3000     1 python claude_helper.py\n"
     )
-    with patch("cctop_dashboard.subprocess.run") as mock_run:
+    with patch("cctop_dashboard.sys.platform", "linux"), \
+         patch("cctop_dashboard.subprocess.run") as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=ps_output, stderr=""
         )
@@ -751,13 +758,28 @@ def test_scan_copilot_child_processes_deduped():
         # A standalone claude session (no children)
         " 3000     1 /usr/local/bin/claude\n"
     )
-    with patch("cctop_dashboard.subprocess.run") as mock_run:
+    with patch("cctop_dashboard.sys.platform", "linux"), \
+         patch("cctop_dashboard.subprocess.run") as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=ps_output, stderr=""
         )
         scan = scan_session_processes()
     assert scan.all_pids == {1001, 1002, 2001, 2002, 3000}
     assert scan.session_count == 3
+
+
+def test_get_pids_windows_dedupes_children():
+    """Windows WMI path should deduplicate child processes."""
+    wmi_output = "14608,7860\n40536,14608\n21744,25252\n24608,21744\n"
+    with patch("cctop_dashboard.sys.platform", "win32"), \
+         patch("cctop_dashboard.subprocess.run") as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=wmi_output, stderr=""
+        )
+        scan = scan_session_processes()
+    assert scan.all_pids == {14608, 40536, 21744, 24608}
+    # 14608 and 21744 are roots (parents not in set)
+    assert scan.session_count == 2
 
 
 # --- check_session_health() unit tests ---
@@ -908,3 +930,62 @@ async def test_health_bar_shows_untracked(fake_status_dir):
             assert "visible" in bar.classes
             rendered = _render_static_text(bar)
             assert "not tracked" in rendered
+
+
+# --- Windows-specific tests ---
+
+
+def test_is_process_dead_windows_ctypes(monkeypatch):
+    """On Windows, _is_process_dead should use ctypes instead of os.kill."""
+    monkeypatch.setattr("cctop_dashboard.sys.platform", "win32")
+    # Mock ctypes to simulate a dead process (OpenProcess returns 0)
+    import types
+    fake_kernel32 = types.SimpleNamespace(
+        OpenProcess=lambda access, inherit, pid: 0,
+        CloseHandle=lambda h: None,
+    )
+    fake_windll = types.SimpleNamespace(kernel32=fake_kernel32)
+    fake_ctypes = types.ModuleType("ctypes")
+    fake_ctypes.windll = fake_windll
+    with patch.dict("sys.modules", {"ctypes": fake_ctypes}):
+        with patch("cctop_dashboard.ctypes", fake_ctypes, create=True):
+            assert _is_process_dead(99999) is True
+
+
+def test_is_process_dead_windows_alive(monkeypatch):
+    """On Windows, _is_process_dead should return False for alive processes."""
+    monkeypatch.setattr("cctop_dashboard.sys.platform", "win32")
+    import types
+    fake_kernel32 = types.SimpleNamespace(
+        OpenProcess=lambda access, inherit, pid: 42,  # nonzero = alive
+        CloseHandle=lambda h: None,
+    )
+    fake_windll = types.SimpleNamespace(kernel32=fake_kernel32)
+    fake_ctypes = types.ModuleType("ctypes")
+    fake_ctypes.windll = fake_windll
+    with patch.dict("sys.modules", {"ctypes": fake_ctypes}):
+        with patch("cctop_dashboard.ctypes", fake_ctypes, create=True):
+            assert _is_process_dead(12345) is False
+
+
+def test_is_process_dead_unix_process_not_found(monkeypatch):
+    """On Unix, ProcessLookupError means dead."""
+    monkeypatch.setattr("cctop_dashboard.sys.platform", "linux")
+    with patch("os.kill", side_effect=ProcessLookupError):
+        assert _is_process_dead(99999) is True
+
+
+def test_is_process_dead_unix_permission_error(monkeypatch):
+    """On Unix, PermissionError means alive (can't signal but exists)."""
+    monkeypatch.setattr("cctop_dashboard.sys.platform", "linux")
+    with patch("os.kill", side_effect=PermissionError):
+        assert _is_process_dead(12345) is False
+
+
+def test_get_pids_windows_handles_error():
+    """Windows WMI path should return empty on failure."""
+    with patch("cctop_dashboard.sys.platform", "win32"), \
+         patch("cctop_dashboard.subprocess.run", side_effect=OSError("no powershell")):
+        scan = scan_session_processes()
+    assert scan.all_pids == set()
+    assert scan.session_count == 0
