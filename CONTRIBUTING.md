@@ -70,11 +70,23 @@ install.ps1                    # Install script (PowerShell, Windows)
 
 ## Testing
 
+### Running locally
+
 ```bash
+# Linux / macOS
 PYTHONPATH=plugin/scripts uv run --with textual --with pytest --with pytest-asyncio -- python -m pytest tests/ -v
 ```
 
-Tests cover: Claude Code JSONL parsing, Copilot CLI events.jsonl parsing, session discovery, model name formatting (Claude/GPT/Gemini), cross-platform PID detection, and headless TUI integration.
+```powershell
+# Windows (PowerShell)
+$env:PYTHONPATH="plugin/scripts"; uv run --with textual --with pytest --with pytest-asyncio -- python -m pytest tests/ -v
+```
+
+### CI
+
+Tests run automatically on every push to `main` and on pull requests via GitHub Actions (`.github/workflows/test.yml`). The CI matrix covers both Ubuntu and Windows.
+
+Tests cover: Claude Code JSONL parsing, Copilot CLI events.jsonl parsing, session discovery, model name formatting (Claude/GPT/Gemini), cross-platform PID detection (Unix `os.kill` and Windows ctypes), process tree deduplication, and headless TUI integration.
 
 ## Reference Docs
 
