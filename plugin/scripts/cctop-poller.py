@@ -414,6 +414,10 @@ def discover_copilot_sessions() -> list[dict]:
         if pid is None:
             continue  # no active lock, session not running
 
+        # Verify the PID is actually alive (lock files can linger on Windows)
+        if not _is_pid_alive(pid):
+            continue
+
         sessions.append({
             "session_id": sid,
             "pid": pid,
@@ -778,6 +782,10 @@ def poll_once() -> None:
         if hook_data is None:
             continue
 
+        # Skip Copilot CLI sessions — handled by poll_copilot_sessions()
+        if hook_data.get("client") == "copilot":
+            continue
+
         sid = hook_data.get("session_id", hook_fp.stem)
         transcript_path = hook_data.get("transcript_path", "")
         if not transcript_path:
@@ -950,7 +958,9 @@ def poll_copilot_sessions() -> None:
             # If the hook plugin is active (last_event is a real hook event like
             # PostToolUse), don't overwrite status — the hook provides more
             # accurate real-time status than the poller's events.jsonl parsing.
-            hook_is_active = hook_data.get("last_event", "") in (
+            # Copilot CLI sessions have no hook, so the poller always owns status.
+            is_copilot = hook_data.get("client") == "copilot"
+            hook_is_active = not is_copilot and hook_data.get("last_event", "") in (
                 "PostToolUse", "PreToolUse", "UserPromptSubmit", "Stop",
                 "SubagentStop", "SessionStart",
             )

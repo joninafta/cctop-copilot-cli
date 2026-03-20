@@ -473,6 +473,19 @@ def load_sessions() -> list[SessionInfo]:
 
 def _is_process_dead(pid: int) -> bool:
     """Check if a process has exited. Returns False if still running or we lack permission."""
+    if sys.platform == "win32":
+        # os.kill(pid, 0) doesn't work on Windows; use ctypes instead
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                kernel32.CloseHandle(handle)
+                return False  # process is alive
+            return True  # process is dead
+        except (OSError, AttributeError):
+            return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -615,28 +628,39 @@ def _get_pids_unix() -> ProcessScan:
 
 
 def _get_pids_windows() -> ProcessScan:
-    """Get PIDs of claude/copilot sessions on Windows via tasklist."""
+    """Get PIDs of claude/copilot sessions on Windows via WMI.
+
+    Copilot CLI spawns child processes per session, so we deduplicate
+    by parent PID, same as the Unix path.
+    """
     pids: set[int] = set()
-    for exe in ("claude.exe", "copilot.exe"):
-        try:
-            result = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {exe}", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=5,
-            )
-            for line in result.stdout.splitlines():
-                line = line.strip().strip('"')
-                if not line:
+    ppids: dict[int, int] = {}
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | "
+             "Where-Object { $_.Name -eq 'copilot.exe' -or $_.Name -eq 'claude.exe' } | "
+             "Select-Object ProcessId,ParentProcessId | "
+             "ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId)\" }"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(",")
+            if len(parts) >= 2:
+                try:
+                    pid = int(parts[0])
+                    ppid = int(parts[1])
+                    pids.add(pid)
+                    ppids[pid] = ppid
+                except ValueError:
                     continue
-                parts = line.split('","')
-                if len(parts) >= 2:
-                    try:
-                        pids.add(int(parts[1].strip('"')))
-                    except ValueError:
-                        continue
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-    # No PPID dedup on Windows yet; tasklist doesn't provide parent info
-    return ProcessScan(all_pids=pids, session_count=len(pids))
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    # Count unique session trees: a "root" is a PID whose parent is not
+    # also in the matched set.
+    roots = sum(1 for p in pids if ppids.get(p) not in pids)
+    return ProcessScan(all_pids=pids, session_count=roots or len(pids))
 
 
 def scan_session_processes() -> ProcessScan:
