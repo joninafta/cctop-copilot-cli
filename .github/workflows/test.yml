@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Run poller tests
+        run: >
+          uv run --with pytest
+          --script tests/test_cctop_poller.py
+          -- -m pytest tests/test_cctop_poller.py -v
+
+      - name: Run dashboard tests
+        env:
+          PYTHONPATH: plugin/scripts
+        run: >
+          uv run --with textual --with pytest --with pytest-asyncio
+          -- python -m pytest tests/test_cctop_dashboard.py -v
