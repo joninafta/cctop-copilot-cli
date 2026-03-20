@@ -335,8 +335,10 @@ async def test_detail_panel_updates(fake_status_dir):
     app = SessionsDashboard()
     async with app.run_test() as pilot:
         await _wait_for_rows(pilot, app)
+        # Extra pauses for detail panel to populate after row highlight
+        for _ in range(10):
+            await pilot.pause()
         detail = app.query_one("#detail", Static)
-        # The first row should auto-highlight and populate detail
         rendered = _render_static_text(detail)
         assert "/home/user/myproject" in rendered
 
@@ -365,6 +367,9 @@ async def test_sort_by_files(fake_status_dir):
     async with app.run_test() as pilot:
         await _wait_for_rows(pilot, app, expected=2)
         app.sort_mode = "files"
+        # Allow re-sort to take effect
+        for _ in range(10):
+            await pilot.pause()
         table = app.query_one(DataTable)
         # First row should be the session with more files
         first_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
@@ -624,6 +629,8 @@ async def test_detail_panel_shows_user_and_assistant(fake_status_dir):
     app = SessionsDashboard()
     async with app.run_test() as pilot:
         await _wait_for_rows(pilot, app)
+        for _ in range(10):
+            await pilot.pause()
         detail = app.query_one("#detail", Static)
         rendered = _render_static_text(detail)
         assert "User" in rendered
@@ -639,6 +646,8 @@ async def test_detail_panel_clears_when_sessions_removed(fake_status_dir):
     app = SessionsDashboard()
     async with app.run_test() as pilot:
         await _wait_for_rows(pilot, app)
+        for _ in range(10):
+            await pilot.pause()
         detail = app.query_one("#detail", Static)
         # Detail should have content from the highlighted session
         assert isinstance(detail.content, Group)
