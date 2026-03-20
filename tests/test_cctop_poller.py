@@ -465,7 +465,8 @@ class TestDiscoverCopilotSessions:
         session_dir.mkdir()
         (session_dir / "events.jsonl").write_text("")
         (session_dir / "inuse.12345.lock").write_text("12345")
-        with patch.object(_mod, "COPILOT_SESSION_DIR", tmp_path):
+        with patch.object(_mod, "COPILOT_SESSION_DIR", tmp_path), \
+             patch.object(_mod, "_is_pid_alive", return_value=True):
             sessions = discover_copilot_sessions()
         assert len(sessions) == 1
         assert sessions[0]["session_id"] == "abc-123"
@@ -496,3 +497,77 @@ class TestDiscoverCopilotSessions:
         with patch.object(_mod, "COPILOT_SESSION_DIR", tmp_path / "nope"):
             sessions = discover_copilot_sessions()
         assert sessions == []
+
+    def test_skips_dead_pid(self, tmp_path):
+        """Sessions with dead PIDs should be filtered out."""
+        session_dir = tmp_path / "dead-session"
+        session_dir.mkdir()
+        (session_dir / "events.jsonl").write_text("")
+        (session_dir / "inuse.99999.lock").write_text("99999")
+        with patch.object(_mod, "COPILOT_SESSION_DIR", tmp_path), \
+             patch.object(_mod, "_is_pid_alive", return_value=False):
+            sessions = discover_copilot_sessions()
+        assert len(sessions) == 0
+
+
+class TestCopilotStatusOwnership:
+    """Tests for Copilot CLI status updates (poller always owns status)."""
+
+    def test_copilot_session_status_updated_by_poller(self):
+        """For Copilot CLI sessions, poller should update status."""
+        events = [
+            json.dumps({"type": "user.message", "data": {"content": "hello"}, "timestamp": "2026-01-01T00:00:00Z"}),
+            json.dumps({"type": "assistant.turn_start", "data": {"turnId": "0", "interactionId": "x"}, "timestamp": "2026-01-01T00:00:01Z"}),
+            json.dumps({"type": "assistant.message", "data": {"content": "hi", "toolRequests": [], "outputTokens": 10}, "timestamp": "2026-01-01T00:00:02Z"}),
+            json.dumps({"type": "assistant.turn_end", "data": {"turnId": "0"}, "timestamp": "2026-01-01T00:00:03Z"}),
+        ]
+        updates = parse_copilot_events(events)
+        # Last event is turn_end, status should be "idle"
+        assert updates["status"] == "idle"
+        assert updates["last_activity"] == "2026-01-01T00:00:03Z"
+
+    def test_copilot_thinking_status_during_turn(self):
+        """Status should be 'thinking' when assistant turn starts."""
+        events = [
+            json.dumps({"type": "user.message", "data": {"content": "hello"}, "timestamp": "2026-01-01T00:00:00Z"}),
+            json.dumps({"type": "assistant.turn_start", "data": {"turnId": "0"}, "timestamp": "2026-01-01T00:00:01Z"}),
+        ]
+        updates = parse_copilot_events(events)
+        assert updates["status"] == "thinking"
+
+
+class TestPollOnceSkipsCopilot:
+    """poll_once() must skip Copilot CLI sessions (handled by poll_copilot_sessions)."""
+
+    def test_poll_once_skips_copilot_client(self, tmp_path):
+        """Copilot sessions should not have their offset advanced by poll_once."""
+        status_dir = tmp_path / "cctop"
+        status_dir.mkdir()
+        sid = "copilot-test-session"
+
+        # Create a Copilot hook JSON with client="copilot"
+        hook_fp = status_dir / f"{sid}.json"
+        hook_fp.write_text(json.dumps({
+            "session_id": sid,
+            "client": "copilot",
+            "transcript_path": str(tmp_path / "events.jsonl"),
+        }))
+
+        # Create a poller JSON with offset=0
+        poller_fp = status_dir / f"{sid}.poller.json"
+        poller_fp.write_text(json.dumps({"_poller_offset": 0, "_poller_inode": 0}))
+
+        # Create an events.jsonl with Copilot events
+        events_fp = tmp_path / "events.jsonl"
+        events_fp.write_text(
+            json.dumps({"type": "user.message", "data": {"content": "hello"}, "timestamp": "2026-01-01T00:00:00Z"}) + "\n"
+        )
+
+        with patch.object(_mod, "STATUS_DIR", status_dir):
+            _mod.poll_once()
+
+        # The poller offset should NOT have been advanced
+        poller_data = json.loads(poller_fp.read_text())
+        assert poller_data["_poller_offset"] == 0, (
+            "poll_once() should skip Copilot sessions, not advance their offset"
+        )
